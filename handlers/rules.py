@@ -2,10 +2,50 @@
 Rule management handlers for CheckMK monitoring rules
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Union
 
 from api.exceptions import CheckMKError
 from handlers.base import BaseHandler
+
+
+def json_to_python_literal(obj: Any) -> str:
+    """Convert a JSON-compatible value to a Python literal string.
+
+    Handles the key difference between JSON and CheckMK's Python literal format:
+    - JSON arrays [] become Python tuples () (CheckMK convention)
+    - Python dicts use single quotes
+    - Booleans are True/False not true/false
+    - None instead of null
+    """
+    if isinstance(obj, dict):
+        items = []
+        for k, v in obj.items():
+            items.append(f"'{k}': {json_to_python_literal(v)}")
+        return "{" + ", ".join(items) + "}"
+    elif isinstance(obj, list):
+        if len(obj) == 2:
+            # Pattern: ("type_string", (warn, crit)) — very common in CheckMK
+            if isinstance(obj[0], str) and isinstance(obj[1], (list, tuple)):
+                inner = json_to_python_literal(obj[1])
+                return f"('{obj[0]}', {inner})"
+            # Pattern: (warn_float, crit_float) — threshold pairs
+            if all(isinstance(x, (int, float)) for x in obj):
+                return f"({obj[0]}, {obj[1]})"
+        # Default: convert to tuple (CheckMK convention)
+        elements = [json_to_python_literal(x) for x in obj]
+        if len(elements) == 1:
+            return f"({elements[0]},)"
+        return "(" + ", ".join(elements) + ")"
+    elif isinstance(obj, str):
+        return f"'{obj}'"
+    elif isinstance(obj, bool):
+        return "True" if obj else "False"
+    elif isinstance(obj, (int, float)):
+        return str(obj)
+    elif obj is None:
+        return "None"
+    else:
+        return repr(obj)
 
 
 class RulesHandler(BaseHandler):
@@ -27,14 +67,38 @@ class RulesHandler(BaseHandler):
                 return await self._delete_rule(arguments)
             elif tool_name == "vibemk_move_rule":
                 return await self._move_rule(arguments)
+            elif tool_name == "vibemk_backup_ruleset":
+                return await self._backup_ruleset(arguments)
             else:
                 return self.error_response("Unknown tool", f"Tool '{tool_name}' is not supported")
 
         except CheckMKError as e:
-            return self.error_response("CheckMK API Error", str(e))
+            return self._format_api_error(e)
         except Exception as e:
             self.logger.exception(f"Error in {tool_name}")
             return self.error_response("Unexpected Error", str(e))
+
+    def _format_api_error(self, error: CheckMKError) -> List[Dict[str, Any]]:
+        """Format CheckMK API errors with full detail from the response body."""
+        response_data = getattr(error, "response_data", {}) or {}
+        status_code = getattr(error, "status_code", None)
+
+        detail = response_data.get("detail", "")
+        fields = response_data.get("fields", {})
+        title = response_data.get("title", str(error))
+
+        msg = f"CheckMK API Error ({status_code})" if status_code else "CheckMK API Error"
+        parts = [f"**{title}**"]
+        if detail:
+            parts.append(detail)
+        if fields:
+            for field, errors in fields.items():
+                if isinstance(errors, list):
+                    parts.append(f"- `{field}`: {', '.join(str(e) for e in errors)}")
+                else:
+                    parts.append(f"- `{field}`: {errors}")
+
+        return self.error_response(msg, "\n".join(parts))
 
     async def _get_rulesets(self, arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Get list of available rulesets"""
@@ -139,31 +203,35 @@ class RulesHandler(BaseHandler):
             }
         ]
 
-    async def _validate_ruleset_value(self, ruleset_name: str, value: Any) -> str:
-        """Validate and format value for specific ruleset"""
-        # This method can be extended to handle specific ruleset requirements
-        # For now, implement basic Python literal formatting
+    def _convert_to_value_raw(self, rule_config: Any) -> str:
+        """Convert a JSON value to a Python literal string for value_raw.
 
-        if isinstance(value, dict):
-            # For rulesets like host_label_rules: {'key': 'value'}
-            return str(value).replace('"', "'")
-        elif isinstance(value, list):
-            if len(value) == 1:
-                # Single item lists often need to be strings
-                return f"'{value[0]}'"
-            else:
-                # Multi-item lists stay as Python list literals
-                return str(value).replace('"', "'")
-        elif isinstance(value, str):
-            # String values need to be Python string literals
-            return f"'{value}'"
+        Handles simple types directly and uses json_to_python_literal for
+        complex dicts/lists that may contain CheckMK tuple patterns.
+        """
+        if isinstance(rule_config, bool):
+            return "True" if rule_config else "False"
+        elif isinstance(rule_config, (int, float)):
+            return str(rule_config)
+        elif isinstance(rule_config, str):
+            # Check if it's already a Python literal (starts with dict/tuple/list syntax)
+            stripped = rule_config.strip()
+            if stripped.startswith(("{", "(", "[", "True", "False", "None")):
+                return rule_config
+            # Simple string values get quoted
+            return f"'{rule_config}'"
+        elif isinstance(rule_config, dict):
+            return json_to_python_literal(rule_config)
+        elif isinstance(rule_config, list):
+            return json_to_python_literal(rule_config)
         else:
-            return str(value)
+            return str(rule_config)
 
     async def _create_rule(self, arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Create a new monitoring rule"""
         ruleset_name = arguments.get("ruleset_name")
-        rule_config = arguments.get("rule_config", {})
+        rule_config = arguments.get("rule_config")
+        value_raw_param = arguments.get("value_raw")
         conditions = arguments.get("conditions", {})
         comment = arguments.get("comment", "")
         folder = arguments.get("folder", "/")
@@ -172,8 +240,13 @@ class RulesHandler(BaseHandler):
         if not ruleset_name:
             return self.error_response("Missing parameter", "ruleset_name is required")
 
-        if not rule_config:
-            return self.error_response("Missing parameter", "rule_config is required")
+        if not value_raw_param and rule_config is None:
+            return self.error_response(
+                "Missing parameter",
+                "Either `value_raw` or `rule_config` is required.\n\n"
+                "Use `value_raw` for complex Python-literal values (checkgroup_parameters, etc.).\n"
+                "Use `rule_config` for simple values (strings, numbers, simple dicts).",
+            )
 
         # Build rule data structure according to CheckMK 2.3 OpenAPI specification
         # Convert folder path: "/" -> "~", "/hosts/linux" -> "~hosts~linux"
@@ -182,8 +255,11 @@ class RulesHandler(BaseHandler):
         else:
             api_folder = "~" + folder.replace("/", "~")
 
-        # Use the validation method to format the value correctly
-        value_raw = await self._validate_ruleset_value(ruleset_name, rule_config)
+        # Determine value_raw: direct passthrough takes priority
+        if value_raw_param:
+            value_raw = value_raw_param
+        else:
+            value_raw = self._convert_to_value_raw(rule_config)
 
         data = {
             "properties": {"disabled": False},
@@ -209,6 +285,7 @@ class RulesHandler(BaseHandler):
                         f"Ruleset: {ruleset_name}\n"
                         f"Rule ID: {rule_id}\n"
                         f"Folder: {folder}\n"
+                        f"Value (raw): `{value_raw}`\n"
                         f"Comment: {comment}\n\n"
                         f"⚠️ **Remember to activate changes!**"
                     ),
@@ -221,6 +298,7 @@ class RulesHandler(BaseHandler):
         """Update an existing rule"""
         rule_id = arguments.get("rule_id")
         rule_config = arguments.get("rule_config")
+        value_raw_param = arguments.get("value_raw")
         conditions = arguments.get("conditions")
         comment = arguments.get("comment")
         disabled = arguments.get("disabled")
@@ -230,8 +308,13 @@ class RulesHandler(BaseHandler):
 
         # Build update data
         data = {}
-        if rule_config:
-            data["value_raw"] = rule_config
+
+        # value_raw takes priority over rule_config
+        if value_raw_param:
+            data["value_raw"] = value_raw_param
+        elif rule_config is not None:
+            data["value_raw"] = self._convert_to_value_raw(rule_config)
+
         if conditions:
             data["conditions"] = conditions
 
@@ -264,6 +347,61 @@ class RulesHandler(BaseHandler):
             ]
         else:
             return self.error_response("Rule update failed", f"Could not update rule '{rule_id}'")
+
+    async def _backup_ruleset(self, arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Backup all rules from a ruleset, returning full JSON including value_raw."""
+        ruleset_name = arguments.get("ruleset_name")
+
+        if not ruleset_name:
+            return self.error_response("Missing parameter", "ruleset_name is required")
+
+        params = {"ruleset_name": ruleset_name}
+        result = self.client.get("domain-types/rule/collections/all", params=params)
+
+        if not result.get("success"):
+            return self.error_response(
+                "Backup failed", f"Could not retrieve rules for ruleset '{ruleset_name}'"
+            )
+
+        rules = result["data"].get("value", [])
+
+        if not rules:
+            return [
+                {
+                    "type": "text",
+                    "text": f"📋 **Ruleset Backup: {ruleset_name}**\n\nNo rules found in this ruleset.",
+                }
+            ]
+
+        import json
+
+        backup_entries = []
+        for rule in rules:
+            rule_id = rule.get("id", "unknown")
+            extensions = rule.get("extensions", {})
+            backup_entries.append(
+                {
+                    "rule_id": rule_id,
+                    "value_raw": extensions.get("value_raw"),
+                    "conditions": extensions.get("conditions", {}),
+                    "properties": extensions.get("properties", {}),
+                    "folder": extensions.get("folder", "/"),
+                    "ruleset": extensions.get("ruleset", ruleset_name),
+                }
+            )
+
+        backup_json = json.dumps(backup_entries, indent=2)
+
+        return [
+            {
+                "type": "text",
+                "text": (
+                    f"📋 **Ruleset Backup: {ruleset_name}**\n\n"
+                    f"Rules: {len(rules)}\n\n"
+                    f"```json\n{backup_json}\n```"
+                ),
+            }
+        ]
 
     async def _delete_rule(self, arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Delete a rule"""

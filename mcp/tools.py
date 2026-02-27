@@ -848,12 +848,19 @@ def get_rule_management_tools() -> List[Dict[str, Any]]:
         },
         {
             "name": "vibemk_create_rule",
-            "description": "➕ Create rule - Add new monitoring rule",
+            "description": "➕ Create rule - Add new monitoring rule. Use value_raw for complex Python-literal values (checkgroup_parameters etc.)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "ruleset_name": {"type": "string", "description": "Ruleset name"},
-                    "rule_config": {"type": "object", "description": "Rule configuration"},
+                    "rule_config": {
+                        "type": ["object", "string", "number", "boolean"],
+                        "description": "Rule value for simple rulesets. Dicts/lists are auto-converted to Python literals.",
+                    },
+                    "value_raw": {
+                        "type": "string",
+                        "description": "Raw Python literal string for the rule value. Use this for checkgroup_parameters and other rulesets that require Python tuple/dict syntax. Passed directly to the API. Example: \"{'levels': ('perc_used', (90.0, 95.0))}\"",
+                    },
                     "conditions": {"type": "object", "description": "Rule conditions"},
                     "comment": {"type": "string", "description": "Rule comment"},
                     "folder": {"type": "string", "description": "Target folder", "default": "/"},
@@ -863,17 +870,24 @@ def get_rule_management_tools() -> List[Dict[str, Any]]:
                         "default": "top",
                     },
                 },
-                "required": ["ruleset_name", "rule_config"],
+                "required": ["ruleset_name"],
             },
         },
         {
             "name": "vibemk_update_rule",
-            "description": "📝 Update rule - Modify existing monitoring rule",
+            "description": "📝 Update rule - Modify existing monitoring rule. Use value_raw for complex Python-literal values.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "rule_id": {"type": "string", "description": "Rule ID"},
-                    "rule_config": {"type": "object", "description": "Rule configuration"},
+                    "rule_config": {
+                        "type": ["object", "string", "number", "boolean"],
+                        "description": "Rule value for simple rulesets. Dicts/lists are auto-converted to Python literals.",
+                    },
+                    "value_raw": {
+                        "type": "string",
+                        "description": "Raw Python literal string for the rule value. Use this for checkgroup_parameters and other rulesets that require Python tuple/dict syntax. Passed directly to the API.",
+                    },
                     "conditions": {"type": "object", "description": "Rule conditions"},
                     "comment": {"type": "string", "description": "Rule comment"},
                     "disabled": {"type": "boolean", "description": "Disable rule"},
@@ -905,6 +919,20 @@ def get_rule_management_tools() -> List[Dict[str, Any]]:
                     "target_rule_id": {"type": "string", "description": "Target rule ID for before/after positioning"},
                 },
                 "required": ["rule_id"],
+            },
+        },
+        {
+            "name": "vibemk_backup_ruleset",
+            "description": "💾 Backup ruleset - Export all rules from a ruleset as JSON with value_raw for backup/restore",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ruleset_name": {
+                        "type": "string",
+                        "description": "Ruleset name to backup (e.g. checkgroup_parameters:memory_linux)",
+                    }
+                },
+                "required": ["ruleset_name"],
             },
         },
     ]

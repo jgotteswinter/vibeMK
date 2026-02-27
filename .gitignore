@@ -82,6 +82,29 @@ claude.md
 */claude.md
 **/claude.md
 
+# Virtual environments (additional patterns)
+.venv/
+
+# Secrets and credentials
+*.pem
+*.key
+*.crt
+*.p12
+credentials*.json
+secrets*.json
+*password*
+*secret*
+!api/exceptions.py
+
+# MCP client configs (may contain credentials)
+mcp_config.json
+*_mcp_config.json
+
+# Test/dev scripts with credentials
+test_mcp*.sh
+mcp_test*.sh
+dev_*.sh
+
 # My ignores
 recommendations.md
 .gitignore

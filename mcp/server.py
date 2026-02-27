@@ -309,6 +309,7 @@ class CheckMKMCPServer:
             "vibemk_update_rule": self.rules_handler,
             "vibemk_delete_rule": self.rules_handler,
             "vibemk_move_rule": self.rules_handler,
+            "vibemk_backup_ruleset": self.rules_handler,
             # Ruleset discovery and search
             "vibemk_search_rulesets": self.rulesets_handler,
             "vibemk_show_ruleset": self.rulesets_handler,
